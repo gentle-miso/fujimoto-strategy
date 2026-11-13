@@ -3,27 +3,30 @@ name: Fujimoto Stock Analysis
 
 on:
   # 한국시간 화~토요일 오전 7시
+  # UTC 기준 월~금요일 오후 10시
   schedule:
-    - cron: '0 7 * * 2-6'
-      timezone: 'Asia/Seoul'
+    - cron: '0 22 * * 1-5'
 
-  # 수동 실행 버튼
+  # GitHub에서 수동 실행 가능
   workflow_dispatch:
+
+# GitHub 저장소에 CSV를 커밋할 수 있도록 권한 부여
+permissions:
+  contents: write
 
 jobs:
   stock-analysis:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
     steps:
-      # 1. GitHub 저장소 불러오기
+      # 1. GitHub 저장소 가져오기
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # 2. Python 설치
-      - name: Setup Python
+      # 2. Python 환경 설정
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -35,10 +38,63 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. 주식 분석 및 Google Drive 저장
+      # 4. 주식 분석 실행 및 Google Drive 저장
       - name: Run stock analysis
         env:
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: python main.py
+
+      # 5. 생성된 CSV를 GitHub results 폴더에 복사
+      - name: Copy CSV to results
+        shell: bash
         run: |
-          python main.py
+          mkdir -p results
+
+          shopt -s nullglob
+          csv_files=( *.csv )
+
+          if (( ${#csv_files[@]} == 0 )); then
+            echo "오류: 생성된 CSV 파일이 없습니다."
+            exit 1
+          fi
+
+          cp "${csv_files[@]}" results/
+
+          echo "GitHub 저장 대상 CSV:"
+          ls -lh results/
+
+      # 6. 3일이 지난 기존 CSV 삭제
+      - name: Delete CSV files older than 3 days
+        shell: bash
+        run: |
+          CUTOFF=$(date -u -d '3 days ago' +%s)
+
+          echo "3일 보관 기준: $(date -u -d "@$CUTOFF")"
+
+          while IFS= read -r -d '' file; do
+
+            LAST_COMMIT=$(git log -1 --format=%ct -- "$file")
+
+            # Git 이력에서 마지막 저장 시각 확인
+            if [[ -n "$LAST_COMMIT" ]] && (( LAST_COMMIT < CUTOFF )); then
+              echo "삭제: $file"
+              rm -f "$file"
+            fi
+
+          done < <(git ls-files -z -- 'results/*.csv')
+
+      # 7. GitHub에 CSV 저장 및 삭제 내용 반영
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A results/
+
+          if git diff --cached --quiet; then
+            echo "GitHub에 변경할 내용이 없습니다."
+          else
+            git commit -m "Update stock analysis results"
+            git push
+          fi
